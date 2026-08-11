@@ -1,5 +1,7 @@
 # Contrarian Signal Skill
 
+![Agent Skill CI](https://github.com/GoodLoongStudio/contrarian-signal-skill/actions/workflows/ci.yml/badge.svg)
+
 A portable Agent Skill for retrospectively measuring whether a public market commentator has functioned as a contrarian indicator.
 
 ## What it does
