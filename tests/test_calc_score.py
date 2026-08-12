@@ -49,6 +49,58 @@ class CalculateScoreTests(unittest.TestCase):
         self.assertEqual(opinion["90-100"]["contrarian_score"], 0.0)
         self.assertEqual(opinion["70-89"]["contrarian_score"], 100.0)
 
+    def test_style_tags_are_conditioned_independently(self):
+        calls = [
+            {"outcome": "ORIGINAL_CORRECT", "event_type": "OPINION", "attribution": "TARGET", "style_tags": ["thesis", "long-horizon"]},
+            {"outcome": "ORIGINAL_CORRECT", "event_type": "OPINION", "attribution": "TARGET", "style_tags": ["THESIS"]},
+            {"outcome": "CONTRARIAN_HIT", "event_type": "ACTION", "attribution": "TARGET", "style_tags": ["breakout chase", "HIGH_CONVICTION"]},
+            {"outcome": "CONTRARIAN_HIT", "event_type": "ACTION", "attribution": "TARGET", "style_tags": ["BREAKOUT_CHASE"]},
+        ]
+        result = calc_score.calculate(calls)
+        self.assertEqual(result["by_style_tag"]["THESIS"]["contrarian_score"], 0.0)
+        self.assertEqual(result["by_style_tag"]["BREAKOUT_CHASE"]["contrarian_score"], 100.0)
+        self.assertEqual(result["by_style_tag_and_event_type"]["OPINION"]["THESIS"]["scored_calls"], 2)
+        self.assertEqual(result["by_style_tag_and_event_type"]["ACTION"]["BREAKOUT_CHASE"]["scored_calls"], 2)
+
+    def test_style_adjustment_shrinks_toward_neutral(self):
+        calls = [
+            {"outcome": "CONTRARIAN_HIT", "event_type": "ACTION", "attribution": "TARGET"},
+            {"outcome": "CONTRARIAN_HIT", "event_type": "ACTION", "attribution": "TARGET"},
+            {"outcome": "CONTRARIAN_HIT", "event_type": "OPINION", "attribution": "TARGET"},
+            {"outcome": "ORIGINAL_CORRECT", "event_type": "OPINION", "attribution": "TARGET"},
+        ]
+        profile = {
+            "primary_archetype": "MIXED",
+            "style_transferability_components": {
+                "horizon_consistency": 50,
+                "action_opinion_consistency": 50,
+                "regime_stability": 50,
+                "directional_persistence": 50,
+                "corpus_representativeness": 50,
+            },
+        }
+        result = calc_score.calculate(calls, profile)
+        self.assertEqual(result["style_profile"]["style_transferability"], 50.0)
+        # RAW empirical = 75; shrink halfway toward 50 => 62.5
+        self.assertEqual(result["style_adjusted"]["RAW"]["style_adjusted_contrarian_score"], 62.5)
+        # ACTION empirical = 100; halfway => 75
+        self.assertEqual(result["style_adjusted"]["ACTION"]["style_adjusted_contrarian_score"], 75.0)
+        # OPINION empirical = 50; remains neutral
+        self.assertEqual(result["style_adjusted"]["OPINION"]["style_adjusted_contrarian_score"], 50.0)
+
+    def test_incomplete_style_profile_does_not_guess_adjusted_score(self):
+        calls = [{"outcome": "CONTRARIAN_HIT", "event_type": "ACTION", "attribution": "TARGET"}]
+        profile = {
+            "style_transferability_components": {
+                "horizon_consistency": 80,
+                "action_opinion_consistency": 70,
+            }
+        }
+        result = calc_score.calculate(calls, profile)
+        self.assertIsNone(result["style_profile"]["style_transferability"])
+        self.assertIsNone(result["style_adjusted"]["RAW"])
+        self.assertIn("regime_stability", result["style_profile"]["style_transferability_missing_components"])
+
     def test_third_party_cannot_enter_target_score(self):
         with self.assertRaises(ValueError):
             calc_score.calculate([{"outcome": "CONTRARIAN_HIT", "event_type": "ACTION", "attribution": "THIRD_PARTY"}])
@@ -88,6 +140,19 @@ class CalculateScoreTests(unittest.TestCase):
             calc_score.calculate([{"outcome": "CONTRARIAN_HIT", "opinion_confidence": 101}])
         with self.assertRaises(ValueError):
             calc_score.calculate([{"outcome": "CONTRARIAN_HIT", "opinion_confidence": "high"}])
+        with self.assertRaises(ValueError):
+            calc_score.calculate([{"outcome": "CONTRARIAN_HIT", "style_tags": "THESIS"}])
+        with self.assertRaises(ValueError):
+            calc_score.calculate(
+                [{"outcome": "CONTRARIAN_HIT"}],
+                {"style_transferability_components": {
+                    "horizon_consistency": 120,
+                    "action_opinion_consistency": 50,
+                    "regime_stability": 50,
+                    "directional_persistence": 50,
+                    "corpus_representativeness": 50,
+                }},
+            )
 
 
 if __name__ == "__main__":
