@@ -1,6 +1,7 @@
 # Contrarian Signal · 反指指数
 
 ![Agent Skill CI](https://github.com/GoodLoongStudio/contrarian-signal-skill/actions/workflows/ci.yml/badge.svg)
+[![skills.sh](https://skills.sh/b/GoodLoongStudio/contrarian-signal-skill)](https://skills.sh/GoodLoongStudio/contrarian-signal-skill)
 
 **公开市场观点历史回测与行为校准 / Retrospective public-market opinion backtesting and behavioral calibration.**
 
@@ -9,6 +10,22 @@ English: [`README.en.md`](README.en.md)
 
 > 仅用于公开信息研究与历史统计，不构成投资建议，不生成买卖指令，不执行交易，也不预测未来收益。  
 > Research support only. Not investment advice. No trade execution, order instructions, or future-return promises.
+
+## Install / 安装
+
+使用开放 Agent Skills CLI 安装：
+
+```bash
+npx skills add GoodLoongStudio/contrarian-signal-skill
+```
+
+也可以直接从仓库 URL 安装：
+
+```bash
+npx skills add https://github.com/GoodLoongStudio/contrarian-signal-skill
+```
+
+仓库采用开放 `SKILL.md` 格式，可被兼容该格式的 Agent 工具与公共 Skill 索引发现。
 
 ## v0.5
 
