@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Calculate retrospective Contrarian Scores from classified historical calls.
 
-v0.3 adds event-type splits:
+v0.4 outputs:
 - combined RAW
-- ACTION
-- OPINION
-- confidence buckets overall
-- confidence buckets inside ACTION and OPINION
+- ACTION / OPINION / UNKNOWN
+- confidence buckets
+- style-tag conditioned scores
+- optional Style-Adjusted Scores using conservative shrinkage toward 50
 
 This script performs retrospective statistics only.
 """
@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,13 @@ VALID_OUTCOMES = {
 }
 VALID_EVENT_TYPES = {"ACTION", "OPINION", "UNKNOWN"}
 VALID_ATTRIBUTION = {"TARGET", "THIRD_PARTY", "UNCERTAIN"}
+TRANSFERABILITY_COMPONENTS = (
+    "horizon_consistency",
+    "action_opinion_consistency",
+    "regime_stability",
+    "directional_persistence",
+    "corpus_representativeness",
+)
 BUCKETS = [
     (90, 100, "90-100", "VERY_HIGH"),
     (70, 89, "70-89", "HIGH"),
@@ -63,8 +71,8 @@ def sample_strength(n: int) -> str:
 
 
 def score_subset(calls: list[dict[str, Any]]) -> dict[str, Any]:
-    original = sum(1 for c in calls if str(c.get("outcome", "")).upper() == "ORIGINAL_CORRECT")
-    contrarian = sum(1 for c in calls if str(c.get("outcome", "")).upper() == "CONTRARIAN_HIT")
+    original = sum(1 for c in calls if c.get("outcome") == "ORIGINAL_CORRECT")
+    contrarian = sum(1 for c in calls if c.get("outcome") == "CONTRARIAN_HIT")
     scored = original + contrarian
     if scored == 0:
         return {
@@ -113,12 +121,33 @@ def bucket_results(calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
+def normalize_style_tag(value: str) -> str:
+    tag = value.strip().upper().replace("-", "_").replace(" ", "_")
+    if not tag or not re.fullmatch(r"[A-Z0-9_]+", tag):
+        raise ValueError(f"style tag must be a non-empty alphanumeric/underscore label; received {value!r}")
+    return tag
+
+
+def style_tag_results(calls: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for call in calls:
+        for tag in call.get("style_tags", []):
+            grouped.setdefault(tag, []).append(call)
+    return {
+        tag: {"candidate_calls": len(grouped[tag]), **score_subset(grouped[tag])}
+        for tag in sorted(grouped)
+    }
+
+
 def normalize_and_validate(calls: list[dict[str, Any]]):
     normalized = []
     confidence_missing = 0
     event_type_missing = 0
+    style_tags_missing = 0
+
     for index, original_call in enumerate(calls):
         call = dict(original_call)
+
         outcome = str(call.get("outcome", "")).upper()
         if outcome not in VALID_OUTCOMES:
             raise ValueError(f"calls[{index}].outcome must be one of {sorted(VALID_OUTCOMES)}; received {outcome!r}")
@@ -152,12 +181,73 @@ def normalize_and_validate(calls: list[dict[str, Any]]):
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 raise ValueError(f"calls[{index}].opinion_confidence must be a number from 0 to 100")
             confidence_bucket(float(value))
+
+        raw_tags = call.get("style_tags")
+        if raw_tags is None:
+            style_tags_missing += 1
+            call["style_tags"] = []
+        else:
+            if not isinstance(raw_tags, list) or not all(isinstance(x, str) for x in raw_tags):
+                raise ValueError(f"calls[{index}].style_tags must be an array of strings")
+            call["style_tags"] = sorted({normalize_style_tag(x) for x in raw_tags})
+
         normalized.append(call)
-    return normalized, confidence_missing, event_type_missing
+
+    return normalized, confidence_missing, event_type_missing, style_tags_missing
 
 
-def calculate(calls: list[dict[str, Any]]) -> dict[str, Any]:
-    normalized, confidence_missing, event_type_missing = normalize_and_validate(calls)
+def validate_style_profile(style_profile: dict[str, Any] | None) -> dict[str, Any] | None:
+    if style_profile is None:
+        return None
+    if not isinstance(style_profile, dict):
+        raise ValueError("style_profile must be a JSON object")
+
+    profile = dict(style_profile)
+    components = profile.get("style_transferability_components")
+    if components is None:
+        profile["style_transferability"] = None
+        return profile
+    if not isinstance(components, dict):
+        raise ValueError("style_transferability_components must be a JSON object")
+
+    missing = [name for name in TRANSFERABILITY_COMPONENTS if name not in components]
+    if missing:
+        profile["style_transferability"] = None
+        profile["style_transferability_missing_components"] = missing
+        return profile
+
+    values = []
+    normalized_components = {}
+    for name in TRANSFERABILITY_COMPONENTS:
+        value = components[name]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= float(value) <= 100:
+            raise ValueError(f"style_transferability_components.{name} must be a number from 0 to 100")
+        normalized_components[name] = round(float(value), 1)
+        values.append(float(value))
+
+    profile["style_transferability_components"] = normalized_components
+    profile["style_transferability"] = round(sum(values) / len(values), 1)
+    return profile
+
+
+def style_adjusted(base: dict[str, Any], transferability: float | None) -> dict[str, Any] | None:
+    if transferability is None or base.get("contrarian_score") is None:
+        return None
+    empirical = float(base["contrarian_score"])
+    adjusted = 50 + (empirical - 50) * transferability / 100
+    return {
+        "empirical_contrarian_score": round(empirical, 1),
+        "style_transferability": round(transferability, 1),
+        "style_adjusted_contrarian_score": round(adjusted, 1),
+        "scored_calls": base.get("scored_calls", 0),
+        "sample_strength": base.get("sample_strength"),
+    }
+
+
+def calculate(calls: list[dict[str, Any]], style_profile: dict[str, Any] | None = None) -> dict[str, Any]:
+    normalized, confidence_missing, event_type_missing, style_tags_missing = normalize_and_validate(calls)
+    profile = validate_style_profile(style_profile)
+
     counts = {name: 0 for name in VALID_OUTCOMES}
     for call in normalized:
         counts[call["outcome"]] += 1
@@ -166,43 +256,68 @@ def calculate(calls: list[dict[str, Any]]) -> dict[str, Any]:
     opinion_calls = [c for c in normalized if c["event_type"] == "OPINION"]
     unknown_calls = [c for c in normalized if c["event_type"] == "UNKNOWN"]
 
+    raw = score_subset(normalized)
+    action_score = score_subset(action_calls)
+    opinion_score = score_subset(opinion_calls)
+    unknown_score = score_subset(unknown_calls)
+
+    transferability = profile.get("style_transferability") if profile else None
+
     return {
-        "schema_version": "0.3.0",
+        "schema_version": "0.4.0",
         "candidate_calls": len(normalized),
         "counts": counts,
-        "raw": score_subset(normalized),
+        "raw": raw,
         "by_event_type": {
-            "ACTION": {"candidate_calls": len(action_calls), **score_subset(action_calls)},
-            "OPINION": {"candidate_calls": len(opinion_calls), **score_subset(opinion_calls)},
-            "UNKNOWN": {"candidate_calls": len(unknown_calls), **score_subset(unknown_calls)},
+            "ACTION": {"candidate_calls": len(action_calls), **action_score},
+            "OPINION": {"candidate_calls": len(opinion_calls), **opinion_score},
+            "UNKNOWN": {"candidate_calls": len(unknown_calls), **unknown_score},
         },
         "confidence_buckets": bucket_results(normalized),
         "confidence_buckets_by_event_type": {
             "ACTION": bucket_results(action_calls),
             "OPINION": bucket_results(opinion_calls),
         },
+        "by_style_tag": style_tag_results(normalized),
+        "by_style_tag_and_event_type": {
+            "ACTION": style_tag_results(action_calls),
+            "OPINION": style_tag_results(opinion_calls),
+        },
+        "style_profile": profile,
+        "style_adjusted": {
+            "RAW": style_adjusted(raw, transferability),
+            "ACTION": style_adjusted(action_score, transferability),
+            "OPINION": style_adjusted(opinion_score, transferability),
+        },
         "confidence_missing_calls": confidence_missing,
         "event_type_missing_calls": event_type_missing,
+        "style_tags_missing_calls": style_tags_missing,
     }
 
 
-def load_calls(path: Path) -> list[dict[str, Any]]:
+def load_payload(path: Path) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
     data = json.loads(path.read_text(encoding="utf-8"))
-    calls = data.get("calls") if isinstance(data, dict) else data
+    if isinstance(data, dict):
+        calls = data.get("calls")
+        style_profile = data.get("style_profile")
+    else:
+        calls = data
+        style_profile = None
     if not isinstance(calls, list):
         raise ValueError("Input must be a JSON array or an object containing a `calls` array.")
     if not all(isinstance(item, dict) for item in calls):
         raise ValueError("Every item in `calls` must be a JSON object.")
-    return calls
+    return calls, style_profile
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Calculate retrospective raw, event-type, and confidence-bucket Contrarian Scores.")
+    parser = argparse.ArgumentParser(description="Calculate retrospective empirical and style-conditioned Contrarian Scores.")
     parser.add_argument("input", type=Path, help="JSON file containing classified historical calls")
     parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON output")
     args = parser.parse_args()
     try:
-        result = calculate(load_calls(args.input))
+        calls, style_profile = load_payload(args.input)
+        result = calculate(calls, style_profile)
     except (OSError, json.JSONDecodeError, ValueError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 2
