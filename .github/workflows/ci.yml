@@ -21,6 +21,9 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Validate release structure and research boundary
+        run: python scripts/validate_skill.py "$GITHUB_WORKSPACE"
+
       - name: Run calculator unit tests
         run: python -m unittest discover -s tests -v
 
