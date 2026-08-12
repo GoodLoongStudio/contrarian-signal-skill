@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
 """Calculate retrospective Contrarian Scores from classified historical calls.
 
-Input is a JSON array or an object with a `calls` array. Each call must contain
-an `outcome` value. Directional calls may also contain `opinion_confidence`
-from 0 to 100.
+v0.3 adds event-type splits:
+- combined RAW
+- ACTION
+- OPINION
+- confidence buckets overall
+- confidence buckets inside ACTION and OPINION
 
-The script always calculates a RAW Contrarian Score from all scored calls,
-regardless of opinion confidence. When confidence is present, it also reports
-separate scores for fixed confidence buckets.
-
-This script performs retrospective statistics only. It does not generate a
-current trading recommendation.
+This script performs retrospective statistics only.
 """
 
 from __future__ import annotations
@@ -22,14 +20,15 @@ import sys
 from pathlib import Path
 from typing import Any
 
-VALID = {
+VALID_OUTCOMES = {
     "ORIGINAL_CORRECT",
     "CONTRARIAN_HIT",
     "FLAT",
     "UNVERIFIABLE",
     "UNSCORABLE",
 }
-
+VALID_EVENT_TYPES = {"ACTION", "OPINION", "UNKNOWN"}
+VALID_ATTRIBUTION = {"TARGET", "THIRD_PARTY", "UNCERTAIN"}
 BUCKETS = [
     (90, 100, "90-100", "VERY_HIGH"),
     (70, 89, "70-89", "HIGH"),
@@ -40,8 +39,7 @@ BUCKETS = [
 ]
 
 
-def wilson_interval(successes: int, total: int, z: float = 1.959963984540054) -> tuple[float, float] | None:
-    """Return a two-sided 95% Wilson interval for a binomial proportion."""
+def wilson_interval(successes: int, total: int, z: float = 1.959963984540054):
     if total <= 0:
         return None
     p = successes / total
@@ -65,10 +63,9 @@ def sample_strength(n: int) -> str:
 
 
 def score_subset(calls: list[dict[str, Any]]) -> dict[str, Any]:
-    original = sum(1 for call in calls if str(call.get("outcome", "")).upper() == "ORIGINAL_CORRECT")
-    contrarian = sum(1 for call in calls if str(call.get("outcome", "")).upper() == "CONTRARIAN_HIT")
+    original = sum(1 for c in calls if str(c.get("outcome", "")).upper() == "ORIGINAL_CORRECT")
+    contrarian = sum(1 for c in calls if str(c.get("outcome", "")).upper() == "CONTRARIAN_HIT")
     scored = original + contrarian
-
     if scored == 0:
         return {
             "scored_calls": 0,
@@ -79,11 +76,9 @@ def score_subset(calls: list[dict[str, Any]]) -> dict[str, Any]:
             "sample_strength": "INSUFFICIENT",
             "contrarian_score_wilson_95": None,
         }
-
     original_accuracy = original / scored * 100
     contrarian_score = contrarian / scored * 100
     interval = wilson_interval(contrarian, scored)
-
     return {
         "scored_calls": scored,
         "original_correct": original,
@@ -95,7 +90,7 @@ def score_subset(calls: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def confidence_bucket(value: float) -> tuple[int, int, str, str]:
+def confidence_bucket(value: float):
     if value < 0 or value > 100:
         raise ValueError(f"opinion_confidence must be between 0 and 100; received {value}")
     for low, high, key, label in BUCKETS:
@@ -104,50 +99,90 @@ def confidence_bucket(value: float) -> tuple[int, int, str, str]:
     raise AssertionError("Unreachable confidence bucket")
 
 
-def calculate(calls: list[dict[str, Any]]) -> dict[str, Any]:
-    counts = {name: 0 for name in VALID}
-    bucket_calls: dict[str, list[dict[str, Any]]] = {key: [] for _, _, key, _ in BUCKETS}
-    confidence_missing = 0
-
-    for index, call in enumerate(calls):
-        outcome = str(call.get("outcome", "")).upper()
-        if outcome not in VALID:
-            raise ValueError(
-                f"calls[{index}].outcome must be one of {sorted(VALID)}; received {outcome!r}"
-            )
-        counts[outcome] += 1
-
-        if "opinion_confidence" not in call or call.get("opinion_confidence") is None:
-            confidence_missing += 1
-            continue
-
+def bucket_results(calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped = {key: [] for _, _, key, _ in BUCKETS}
+    for call in calls:
         value = call.get("opinion_confidence")
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise ValueError(f"calls[{index}].opinion_confidence must be a number from 0 to 100")
+        if value is None:
+            continue
         _, _, key, _ = confidence_bucket(float(value))
-        bucket_calls[key].append(call)
+        grouped[key].append(call)
+    return [
+        {"range": key, "label": label, "candidate_calls": len(grouped[key]), **score_subset(grouped[key])}
+        for _, _, key, label in BUCKETS
+    ]
 
-    raw = score_subset(calls)
 
-    buckets: list[dict[str, Any]] = []
-    for low, high, key, label in BUCKETS:
-        subset = bucket_calls[key]
-        bucket_result = score_subset(subset)
-        buckets.append(
-            {
-                "range": key,
-                "label": label,
-                "candidate_calls": len(subset),
-                **bucket_result,
-            }
-        )
+def normalize_and_validate(calls: list[dict[str, Any]]):
+    normalized = []
+    confidence_missing = 0
+    event_type_missing = 0
+    for index, original_call in enumerate(calls):
+        call = dict(original_call)
+        outcome = str(call.get("outcome", "")).upper()
+        if outcome not in VALID_OUTCOMES:
+            raise ValueError(f"calls[{index}].outcome must be one of {sorted(VALID_OUTCOMES)}; received {outcome!r}")
+        call["outcome"] = outcome
+
+        raw_event_type = call.get("event_type")
+        if raw_event_type is None:
+            event_type_missing += 1
+            event_type = "UNKNOWN"
+        else:
+            event_type = str(raw_event_type).upper()
+            if event_type not in VALID_EVENT_TYPES:
+                raise ValueError(f"calls[{index}].event_type must be one of {sorted(VALID_EVENT_TYPES)}; received {event_type!r}")
+        call["event_type"] = event_type
+
+        raw_attribution = call.get("attribution")
+        if raw_attribution is not None:
+            attribution = str(raw_attribution).upper()
+            if attribution not in VALID_ATTRIBUTION:
+                raise ValueError(f"calls[{index}].attribution must be one of {sorted(VALID_ATTRIBUTION)}; received {attribution!r}")
+            call["attribution"] = attribution
+            if outcome in {"ORIGINAL_CORRECT", "CONTRARIAN_HIT"} and attribution != "TARGET":
+                raise ValueError(
+                    f"calls[{index}] is scored but attribution={attribution}; only TARGET records may enter target scores"
+                )
+
+        if call.get("opinion_confidence") is None:
+            confidence_missing += 1
+        else:
+            value = call.get("opinion_confidence")
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(f"calls[{index}].opinion_confidence must be a number from 0 to 100")
+            confidence_bucket(float(value))
+        normalized.append(call)
+    return normalized, confidence_missing, event_type_missing
+
+
+def calculate(calls: list[dict[str, Any]]) -> dict[str, Any]:
+    normalized, confidence_missing, event_type_missing = normalize_and_validate(calls)
+    counts = {name: 0 for name in VALID_OUTCOMES}
+    for call in normalized:
+        counts[call["outcome"]] += 1
+
+    action_calls = [c for c in normalized if c["event_type"] == "ACTION"]
+    opinion_calls = [c for c in normalized if c["event_type"] == "OPINION"]
+    unknown_calls = [c for c in normalized if c["event_type"] == "UNKNOWN"]
 
     return {
-        "candidate_calls": len(calls),
+        "schema_version": "0.3.0",
+        "candidate_calls": len(normalized),
         "counts": counts,
-        "raw": raw,
-        "confidence_buckets": buckets,
+        "raw": score_subset(normalized),
+        "by_event_type": {
+            "ACTION": {"candidate_calls": len(action_calls), **score_subset(action_calls)},
+            "OPINION": {"candidate_calls": len(opinion_calls), **score_subset(opinion_calls)},
+            "UNKNOWN": {"candidate_calls": len(unknown_calls), **score_subset(unknown_calls)},
+        },
+        "confidence_buckets": bucket_results(normalized),
+        "confidence_buckets_by_event_type": {
+            "ACTION": bucket_results(action_calls),
+            "OPINION": bucket_results(opinion_calls),
+        },
         "confidence_missing_calls": confidence_missing,
+        "event_type_missing_calls": event_type_missing,
     }
 
 
@@ -162,17 +197,15 @@ def load_calls(path: Path) -> list[dict[str, Any]]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Calculate retrospective raw and confidence-bucket Contrarian Scores.")
+    parser = argparse.ArgumentParser(description="Calculate retrospective raw, event-type, and confidence-bucket Contrarian Scores.")
     parser.add_argument("input", type=Path, help="JSON file containing classified historical calls")
     parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON output")
     args = parser.parse_args()
-
     try:
         result = calculate(load_calls(args.input))
     except (OSError, json.JSONDecodeError, ValueError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 2
-
     print(json.dumps(result, ensure_ascii=False, indent=2 if args.pretty else None))
     return 0
 
