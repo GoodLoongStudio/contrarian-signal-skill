@@ -28,4 +28,4 @@ jobs:
         uses: astral-sh/setup-uv@v6
 
       - name: Validate Agent Skill specification
-        run: uvx --from git+https://github.com/agentskills/agentskills#subdirectory=skills-ref skills-ref validate .
+        run: uvx --from git+https://github.com/agentskills/agentskills#subdirectory=skills-ref skills-ref validate "$GITHUB_WORKSPACE"
