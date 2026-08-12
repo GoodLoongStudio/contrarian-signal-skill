@@ -2,48 +2,94 @@
 
 ![Agent Skill CI](https://github.com/GoodLoongStudio/contrarian-signal-skill/actions/workflows/ci.yml/badge.svg)
 
-A portable Agent Skill for retrospectively measuring whether a public market commentator has functioned as a contrarian indicator.
+A portable Agent Skill for retrospectively measuring whether a public market commentator has functioned as a contrarian indicator — while separating bad direction from bad timing, leverage, concentration, and personal trading style.
 
-## v0.3 highlights
+## v0.4 highlights
 
-The score is no longer a single undifferentiated number. The skill now separates:
+The skill now has three analysis layers:
 
-- **RAW** — every scored directional record, no confidence threshold;
-- **ACTION** — the target's own actual buy/sell/hold/reduce/clear-position actions;
-- **OPINION** — directional market views without a position change;
-- **confidence buckets** — 90-100, 70-89, 50-69, 30-49, 10-29, 0-9;
-- **attribution** — TARGET vs THIRD_PARTY vs UNCERTAIN.
+- **Empirical scores:** RAW, ACTION, OPINION, and confidence buckets;
+- **Style-conditioned scores:** historical inverse-hit rates for recurring behaviors such as THESIS, CATALYST, DIP_BUY, BREAKOUT_CHASE, MOMENTUM, RAPID_REVERSAL, etc.;
+- **Style-Adjusted Score:** optional conservative generalization score that shrinks unstable historical patterns toward neutral 50.
 
-This prevents fan submissions, reposts, ordinary opinions, and actual trades from being mixed into one misleading statistic.
+This matters because a person can have accurate long-horizon research but poor short-horizon entries, or vice versa.
 
-## Core metric
+## Core empirical metric
 
 ```text
 Contrarian Score = CONTRARIAN_HIT / (CONTRARIAN_HIT + ORIGINAL_CORRECT) * 100
 ```
 
-Sample size never modifies the numerical score; sample strength and Wilson confidence intervals are reported separately.
+Sample size and personal style never rewrite this empirical number.
+
+## Style-adjusted metric
+
+When a sufficiently broad corpus supports all five style-transferability dimensions:
+
+```text
+style_transferability = mean(
+  horizon_consistency,
+  action_opinion_consistency,
+  regime_stability,
+  directional_persistence,
+  corpus_representativeness
+)
+
+Style-Adjusted Score =
+  50 + (Empirical Contrarian Score - 50) * style_transferability / 100
+```
+
+Example: empirical Contrarian Score `80`, style transferability `50` -> Style-Adjusted Score `65`.
+
+The adjustment never replaces the historical `80`; it communicates that the pattern is only moderately transferable.
+
+## Personal style model
+
+Calls can contain zero or more `style_tags`, assigned before checking outcomes. Recommended tags include:
+
+- `THESIS`
+- `CATALYST`
+- `MOMENTUM`
+- `MEAN_REVERSION`
+- `DIP_BUY`
+- `BREAKOUT_CHASE`
+- `VALUE`
+- `MACRO`
+- `NEWS_REACTION`
+- `HIGH_CONVICTION`
+- `LEVERAGED`
+- `CONCENTRATED`
+- `RAPID_REVERSAL`
+- `LONG_HORIZON`
+- `SHORT_HORIZON`
+
+The report also summarizes a primary archetype such as `THESIS_DRIVEN`, `CATALYST_TRADER`, `MOMENTUM_TRADER`, `VALUE_INVESTOR`, `HIGH_CONVICTION_CONCENTRATED`, `RAPID_REVERSAL_TRADER`, or `MIXED`.
+
+Risk amplifiers such as leverage and concentration are reported separately. They can explain drawdowns but do not automatically imply contrarian behavior.
 
 ## Default retrospective workflow
 
 1. review reachable public market-related content from the previous 365 days;
-2. resolve whether each record is the target's own statement/action;
-3. classify `event_type` as ACTION / OPINION / UNKNOWN;
+2. resolve attribution: TARGET / THIRD_PARTY / UNCERTAIN;
+3. classify `event_type`: ACTION / OPINION / UNKNOWN;
 4. extract BULLISH / BEARISH / NEUTRAL / UNSCORABLE direction;
-5. assign `opinion_confidence` before checking later prices;
-6. freeze the evaluation horizon before outcome lookup;
-7. deduplicate repeated theses/actions;
-8. verify later market prices;
-9. calculate RAW, ACTION, OPINION, and confidence-bucket scores;
-10. report evidence, exclusions, sample strength, Wilson intervals, and coverage limitations.
+5. assign `opinion_confidence` before checking prices;
+6. assign style tags before checking prices;
+7. freeze the evaluation horizon;
+8. deduplicate repeated theses/actions;
+9. verify later market prices;
+10. calculate RAW, ACTION, OPINION, confidence-bucket, and style-conditioned scores;
+11. build the Personal Style Profile;
+12. optionally calculate Style-Adjusted Scores when all transferability dimensions are justified.
 
 ## Horizon policy
 
 To prevent hindsight selection:
 
-- ACTION without an explicit horizon -> next trading-session close (24h for 24/7 markets);
+- ACTION without explicit horizon -> next trading-session close (24h for 24/7 markets);
 - OPINION -> explicit horizon when present; otherwise deterministic wording mapping; default 5 trading days when no time wording exists;
-- optional longer-horizon diagnostics may be shown separately, but cannot replace the frozen primary score after outcomes are known.
+- long-horizon THESIS records use their recoverable intended horizon, not an arbitrary next-day test;
+- a bad short-term action cannot be rescued by extending the horizon after the result is known.
 
 ## Repository layout
 
@@ -55,43 +101,43 @@ contrarian-signal-skill/
 │   └── calc_score.py
 ├── references/
 │   ├── event-model.md
-│   └── scoring-rules.md
+│   ├── scoring-rules.md
+│   └── style-model.md
 ├── assets/
 │   └── report-template.md
 └── tests/
     └── test_calc_score.py
 ```
 
-## Example requests
-
-```text
-看看这个人过去一年是不是反指。
-```
-
-```text
-把他的实际买卖动作和普通观点分开算反指指数。
-```
-
-```text
-把 90%-100%、70%-89% 等置信度分桶列出来，再给一个不限置信度 RAW 分数。
-```
-
-## Calculator input
+## Example calculator input
 
 ```json
 {
-  "calls": [
-    {
-      "outcome": "CONTRARIAN_HIT",
-      "event_type": "ACTION",
-      "attribution": "TARGET",
-      "opinion_confidence": 98
+  "style_profile": {
+    "primary_archetype": "THESIS_DRIVEN",
+    "style_transferability_components": {
+      "horizon_consistency": 85,
+      "action_opinion_consistency": 75,
+      "regime_stability": 65,
+      "directional_persistence": 90,
+      "corpus_representativeness": 80
     },
+    "risk_amplifiers": ["LEVERAGED", "CONCENTRATED"]
+  },
+  "calls": [
     {
       "outcome": "ORIGINAL_CORRECT",
       "event_type": "OPINION",
       "attribution": "TARGET",
-      "opinion_confidence": 75
+      "opinion_confidence": 92,
+      "style_tags": ["THESIS", "LONG_HORIZON", "HIGH_CONVICTION"]
+    },
+    {
+      "outcome": "CONTRARIAN_HIT",
+      "event_type": "ACTION",
+      "attribution": "TARGET",
+      "opinion_confidence": 98,
+      "style_tags": ["BREAKOUT_CHASE", "LEVERAGED"]
     }
   ]
 }
@@ -103,24 +149,27 @@ Run:
 python3 scripts/calc_score.py calls.json --pretty
 ```
 
-The JSON output contains:
+Output includes:
 
 - `raw`
-- `by_event_type.ACTION`
-- `by_event_type.OPINION`
-- `by_event_type.UNKNOWN`
+- `by_event_type`
 - `confidence_buckets`
-- `confidence_buckets_by_event_type.ACTION`
-- `confidence_buckets_by_event_type.OPINION`
+- `confidence_buckets_by_event_type`
+- `by_style_tag`
+- `by_style_tag_and_event_type`
+- `style_profile`
+- `style_adjusted`
 - missing-field audit counts
 
 ## Data-integrity guards
 
-- A scored record with `attribution=THIRD_PARTY` or `UNCERTAIN` is rejected by the calculator.
-- Missing legacy `event_type` is retained as `UNKNOWN` rather than silently guessed.
-- Repeated substantially identical calls are deduplicated.
-- Event type, attribution, direction, confidence, and horizon must be frozen before outcome lookup.
-- Viral/embarrassing examples must not be cherry-picked as a substitute for reachable corpus coverage.
+- Scored THIRD_PARTY or UNCERTAIN records are rejected.
+- Missing legacy event type stays `UNKNOWN` instead of being guessed.
+- Style tags must be assigned before outcome lookup.
+- Incomplete style-transferability evidence produces `null`, not a guessed adjusted score.
+- Leverage/concentration do not alter empirical accuracy.
+- Viral failures cannot substitute for broad corpus coverage.
+- Long-horizon thesis accuracy and short-horizon timing accuracy are explicitly separable.
 
 ## Tests
 
@@ -128,8 +177,8 @@ The JSON output contains:
 python3 -m unittest discover -s tests -p 'test_*.py'
 ```
 
-CI also validates the Agent Skill and runs the calculator tests on pushes and pull requests.
+CI also validates the Agent Skill specification.
 
 ## Version
 
-Current Skill version: **0.3.0**
+Current Skill version: **0.4.0**
